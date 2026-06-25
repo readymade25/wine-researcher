@@ -1,4 +1,4 @@
-from flask import Flask, request
+from flask import Flask, request, jsonify
 import os
 
 app = Flask(__name__)
@@ -45,15 +45,15 @@ def wine():
     if name in wines:
         w = wines[name]
 
-        return f"""
-        <h2>{name}</h2>
-        <p><b>Region:</b> {w['region']}</p>
-        <p><b>Acidity:</b> {w['acidity']}</p>
-        <p><b>Body:</b> {w['body']}</p>
-        <p><b>Descriptors:</b> {', '.join(w['descriptors'])}</p>
-        """
+        return {
+            "name": name,
+            "region": w["region"],
+            "acidity": w["acidity"],
+            "body": w["body"],
+            "descriptors": w["descriptors"]
+        }
 
-    return "<h2>Wine not found</h2>"
+    return {"error": "Wine not found"}
 
 
 if __name__ == "__main__":
