@@ -1,7 +1,12 @@
 from flask import Flask, request, jsonify
 import os
+from difflib import get_close_matches
 
 app = Flask(__name__)
+
+# -------------------
+# DATA
+# -------------------
 
 wines = {
     "Barbera d'Asti": {
@@ -26,6 +31,48 @@ wines = {
     }
 }
 
+# -------------------
+# ENGINE FUNCTIONS
+# -------------------
+
+def normalize(text):
+    if not text:
+        return ""
+    return text.strip().lower().replace("’", "'")
+
+
+def find_best_match(query):
+    keys = list(wines.keys())
+    match = get_close_matches(query, keys, n=1, cutoff=0.4)
+
+    if match:
+        return match[0]
+
+    return None
+
+
+def get_shelf_view(query):
+    q = normalize(query)
+
+    results = []
+
+    for name, w in wines.items():
+        if (
+            q in normalize(name)
+            or q in normalize(w["region"])
+            or q in normalize(" ".join(w["descriptors"]))
+        ):
+            results.append({
+                "name": name,
+                **w
+            })
+
+    return results
+
+
+# -------------------
+# ROUTES
+# -------------------
 
 @app.route("/")
 def home():
@@ -40,21 +87,58 @@ def home():
 
 @app.route("/wine")
 def wine():
-    name = request.args.get("name")
+    name = request.args.get("name", "")
 
-    if name in wines:
-        w = wines[name]
+    match = find_best_match(name)
 
+    if not match:
+        return {"error": "Wine not found"}
+
+    w = wines[match]
+
+    return {
+        "name": match,
+        "region": w["region"],
+        "acidity": w["acidity"],
+        "body": w["body"],
+        "descriptors": w["descriptors"]
+    }
+
+
+@app.route("/supermarket")
+def supermarket():
+    query = request.args.get("query", "")
+
+    if not query:
         return {
-            "name": name,
-            "region": w["region"],
-            "acidity": w["acidity"],
-            "body": w["body"],
-            "descriptors": w["descriptors"]
+            "message": "Try: Bolla, Soave, Barbera, or anything on the shelf"
         }
 
-    return {"error": "Wine not found"}
+    results = get_shelf_view(query)
 
+    if not results:
+        return {
+            "query": query,
+            "message": "No wines found"
+        }
+
+    # simple recommendation logic
+    recommendation = "Pick the first result if unsure."
+
+    if len(results) > 1:
+        recommendation = "Lower acidity = smoother. Higher acidity = fresher taste."
+
+    return {
+        "query": query,
+        "count": len(results),
+        "shelf": results,
+        "recommendation": recommendation
+    }
+
+
+# -------------------
+# RUN SERVER
+# -------------------
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
