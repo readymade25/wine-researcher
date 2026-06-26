@@ -14,9 +14,9 @@ import requests
 # In production these CSV URLs would be your published Google Sheets
 # (File > Share > Publish to web > CSV), same pattern as your Tottori site.
 
-TIER1_CSV_URL = "https://example.com/your-tasted-wines.csv"
-TIER2_RECOGNITION_CSV_URL = "https://example.com/grape-recognition.csv"
-TIER2_PAIRING_CSV_URL = "https://example.com/grape-pairing-rules.csv"
+TIER1_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTePDaX89kTpBqes9f2nTTt8yWpryyq20sbk2Xah02bwoCAYW5DHegoftoHyU-ztN4orUJmxaCdMTWW/pub?output=csv"
+TIER2_RECOGNITION_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRcTkssOHFFWVeMKhwbYcxCDOVAkyRMWyRD5CCStXxOVe5Ey9O0yNdvmu468tLzBmFrOgangrDI7Pwt/pub?output=csv"
+TIER2_PAIRING_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRssfhdcNwUEWAgokQFrCJzNoGqV5v6rGggF2xJ0ax7m9tHyFgrUNhwHd0SFNuR_830l9C6SBzqYxPj/pub?output=csv"
 
 LOG_FILE = "misses_log.csv"  # append-only log of Tier 3 fallbacks for later review
 
