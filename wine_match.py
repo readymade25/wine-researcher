@@ -34,14 +34,32 @@ def normalize(text):
 
 
 def tier1_lookup(query, tasted_wines):
-    """Exact/substring match against your personally tasted wines."""
+    """Match against your personally tasted wines.
+
+    Checks the query against producer, wine_name, and the combined
+    "producer + wine_name" string, so a search for just the producer
+    ("Felsina") or just the specific wine ("Rancia") can both match.
+    """
     q = normalize(query)
     for row in tasted_wines:
-        name = normalize(row.get("name", ""))
-        if q == name or q in name or name in q:
+        producer = normalize(row.get("producer", ""))
+        wine_name = normalize(row.get("wine_name", ""))
+        combined = normalize(f"{row.get('producer', '')} {row.get('wine_name', '')}".strip())
+
+        candidates = [producer, wine_name, combined]
+        match = any(
+            c and (q == c or q in c or c in q)
+            for c in candidates
+        )
+
+        if match:
             return {
                 "tier": 1,
-                "name": row["name"],
+                "producer": row.get("producer"),
+                "wine_name": row.get("wine_name"),
+                "grape": row.get("grape"),
+                "colour": row.get("colour"),
+                "country": row.get("country"),
                 "style": row.get("style"),
                 "pairing": row.get("pairing"),
                 "value_note": row.get("value_note"),
@@ -154,11 +172,18 @@ if __name__ == "__main__":
     # (e.g. refresh every hour) rather than fetched on every request.
     tasted_wines = [
         {
-            "name": "Bolla Soave Classico",
+            "producer": "Bolla",
+            "wine_name": "Soave Classico",
+            "grape": "Garganega",
+            "colour": "White",
+            "country": "Italy",
             "style": "Light, crisp, dry white",
             "pairing": "Salmon, light seafood, easy drinking",
             "value_note": "Solid for the price, reliable supermarket pick",
             "personal_take": "Always a safe bet when nothing else stands out",
+            "shop": "Kaldi",
+            "shop_price": "998",
+            "market_price_reference": "890",
         }
     ]
 
