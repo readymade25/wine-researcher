@@ -46,6 +46,9 @@ def tier1_lookup(query, tasted_wines):
                 "pairing": row.get("pairing"),
                 "value_note": row.get("value_note"),
                 "personal_take": row.get("personal_take"),
+                "shop": row.get("shop"),
+                "shop_price": row.get("shop_price"),
+                "market_price_reference": row.get("market_price_reference"),
             }
     return None
 
