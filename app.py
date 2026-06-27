@@ -83,9 +83,11 @@ def lookup():
 
     tasted_wines, recognition_rows, pairing_rows = get_data()
 
-    result = tier1_lookup(query, tasted_wines)
-    if result:
-        return jsonify(result)
+    tier1_matches = tier1_lookup(query, tasted_wines)
+    if tier1_matches:
+        if len(tier1_matches) == 1:
+            return jsonify(tier1_matches[0])
+        return jsonify({"tier": 1, "matches": tier1_matches})
 
     result = tier2_lookup(query, recognition_rows, pairing_rows)
     if result and result.get("pairing"):
