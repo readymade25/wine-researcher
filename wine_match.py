@@ -40,8 +40,15 @@ def tier1_lookup(query, tasted_wines):
     Checks the query against producer, wine_name, and the combined
     "producer + wine_name" string, so a search for just the producer
     ("Felsina") or just the specific wine ("Rancia") can both match.
+
+    Returns a LIST of all matching wines, not just the first one --
+    e.g. searching "Hilt" when you have both a Hilt Chardonnay and a
+    Hilt Pinot Noir in your sheet should surface both, not silently
+    pick whichever appears first.
     """
     q = normalize(query)
+    matches = []
+
     for row in tasted_wines:
         producer = normalize(row.get("producer", ""))
         wine_name = normalize(row.get("wine_name", ""))
@@ -54,7 +61,7 @@ def tier1_lookup(query, tasted_wines):
         )
 
         if match:
-            return {
+            matches.append({
                 "tier": 1,
                 "producer": row.get("producer"),
                 "wine_name": row.get("wine_name"),
@@ -68,8 +75,10 @@ def tier1_lookup(query, tasted_wines):
                 "shop": row.get("shop"),
                 "shop_price": row.get("shop_price"),
                 "market_price_reference": row.get("market_price_reference"),
-            }
-    return None
+                "image_url": row.get("image_url"),
+            })
+
+    return matches if matches else None
 
 
 def tier2_lookup(query, recognition_rows, pairing_rows):
