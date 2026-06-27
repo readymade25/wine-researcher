@@ -8,6 +8,7 @@ Tier 3: LLM fallback for anything that misses both (logged for later cataloguing
 
 import csv
 import io
+import json
 import requests
 
 # --- Example data sources -----------------------------------------------
@@ -131,7 +132,9 @@ def tier3_llm_fallback(query, api_key):
                         "covering: typical style (light/full, dry/sweet), a "
                         "concrete food pairing, and whether it's drink-now or "
                         "can be held. No fluff, no marketing tone. "
-                        "Respond as JSON with keys: style, pairing, drink_window."
+                        "Respond with ONLY raw JSON, no markdown code fences, "
+                        "no preamble, just the JSON object with keys: "
+                        "style, pairing, drink_window."
                     ),
                 }
             ],
@@ -140,8 +143,28 @@ def tier3_llm_fallback(query, api_key):
     )
     response.raise_for_status()
     data = response.json()
-    text = "".join(block.get("text", "") for block in data.get("content", []))
-    return {"tier": 3, "raw": text}
+    raw_text = "".join(block.get("text", "") for block in data.get("content", []))
+
+    # Strip markdown code fences if the model added them despite instructions
+    cleaned = raw_text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("```")[1]
+        if cleaned.startswith("json"):
+            cleaned = cleaned[4:]
+        cleaned = cleaned.strip()
+
+    try:
+        parsed = json.loads(cleaned)
+        return {
+            "tier": 3,
+            "style": parsed.get("style"),
+            "pairing": parsed.get("pairing"),
+            "drink_window": parsed.get("drink_window"),
+        }
+    except (json.JSONDecodeError, ValueError):
+        # If parsing fails for any reason, fall back to showing the raw text
+        # rather than crashing the request.
+        return {"tier": 3, "raw": raw_text}
 
 
 def log_miss(query):
