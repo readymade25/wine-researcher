@@ -18,6 +18,7 @@ import requests
 TIER1_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTePDaX89kTpBqes9f2nTTt8yWpryyq20sbk2Xah02bwoCAYW5DHegoftoHyU-ztN4orUJmxaCdMTWW/pub?output=csv"
 TIER2_RECOGNITION_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRcTkssOHFFWVeMKhwbYcxCDOVAkyRMWyRD5CCStXxOVe5Ey9O0yNdvmu468tLzBmFrOgangrDI7Pwt/pub?output=csv"
 TIER2_PAIRING_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRssfhdcNwUEWAgokQFrCJzNoGqV5v6rGggF2xJ0ax7m9tHyFgrUNhwHd0SFNuR_830l9C6SBzqYxPj/pub?output=csv"
+SHOP_PICKS_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQIbZYk4yJtk9jrClYeSuI9_Nq99qfnhga4HbcDTIA9mQUlgOlZxuFcUiLKTM8SwlPMWBXVGcXS8lkU/pub?output=csv"
 
 LOG_FILE = "misses_log.csv"  # append-only log of Tier 3 fallbacks for later review
 
