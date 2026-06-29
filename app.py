@@ -21,10 +21,12 @@ from wine_match import (
     tier3_llm_fallback,
     log_miss,
     normalize,
+    filter_shop_picks,
     TIER1_CSV_URL,
     TIER2_RECOGNITION_CSV_URL,
     TIER2_PAIRING_CSV_URL,
     SHOP_PICKS_CSV_URL,
+    FOOD_SYNONYMS_CSV_URL,
 )
 
 app = Flask(__name__)
@@ -37,7 +39,14 @@ LLM_API_KEY = os.environ.get("ANTHROPIC_API_KEY")  # set this in Render's dashbo
 # Refreshes automatically once the cache is older than CACHE_SECONDS.
 
 CACHE_SECONDS = 60 * 60  # 1 hour
-_cache = {"loaded_at": 0, "tasted_wines": [], "recognition_rows": [], "pairing_rows": [], "shop_picks": []}
+_cache = {
+    "loaded_at": 0,
+    "tasted_wines": [],
+    "recognition_rows": [],
+    "pairing_rows": [],
+    "shop_picks": [],
+    "food_synonyms": [],
+}
 
 
 def get_data():
@@ -72,16 +81,41 @@ def get_data():
                  "pairing": "Tomato-based pasta, pizza, grilled meats", "drink_window": "Drink now"},
             ]
             _cache["shop_picks"] = [
-                {"shop": "Kaldi", "producer": "Bolla", "wine_name": "Soave",
-                 "why_pick_this": "Safe, easy white, always reliable here", "price_range": "~¥1000"},
+                {"shop": "Kaldi", "producer_en": "Bolla", "producer_jp": "ボッラ",
+                 "wine_name_en": "Soave Classico", "wine_name_jp": "ソアーヴェ",
+                 "colour": "White", "grape": "Garganega", "country": "Italy",
+                 "abv": "12.5", "sweetness": "Dry",
+                 "pairings_en": "Salmon, light seafood, easy drinking",
+                 "pairings_jp": "サーモン、軽い魚介類",
+                 "comment_en": "", "comment_jp": "",
+                 "confidence": "tasted", "price_range": "~¥1000"},
+                {"shop": "Kaldi", "producer_en": "Allegrini", "producer_jp": "アッレグリーニ",
+                 "wine_name_en": "Amarone", "wine_name_jp": "アマローネ",
+                 "colour": "Red", "grape": "Corvina blend", "country": "Italy",
+                 "abv": "16.5", "sweetness": "Dry",
+                 "pairings_en": "Aged cheese, braised meats, rich stews",
+                 "pairings_jp": "熟成チーズ、煮込み料理",
+                 "comment_en": "Too heavy for most occasions", "comment_jp": "",
+                 "confidence": "tasted", "price_range": "~¥2500"},
+            ]
+            _cache["food_synonyms"] = [
+                {"food_term": "unagi", "broader_category": "fish"},
+                {"food_term": "sukiyaki", "broader_category": "red meat"},
             ]
         else:
             _cache["tasted_wines"] = fetch_csv(TIER1_CSV_URL)
             _cache["recognition_rows"] = fetch_csv(TIER2_RECOGNITION_CSV_URL)
             _cache["pairing_rows"] = fetch_csv(TIER2_PAIRING_CSV_URL)
             _cache["shop_picks"] = fetch_csv(SHOP_PICKS_CSV_URL)
+            _cache["food_synonyms"] = fetch_csv(FOOD_SYNONYMS_CSV_URL)
         _cache["loaded_at"] = time.time()
-    return _cache["tasted_wines"], _cache["recognition_rows"], _cache["pairing_rows"], _cache["shop_picks"]
+    return (
+        _cache["tasted_wines"],
+        _cache["recognition_rows"],
+        _cache["pairing_rows"],
+        _cache["shop_picks"],
+        _cache["food_synonyms"],
+    )
 
 
 @app.route("/lookup", methods=["GET"])
@@ -96,7 +130,7 @@ def lookup():
     if not query:
         return jsonify({"error": "Missing 'wine' parameter"}), 400
 
-    tasted_wines, recognition_rows, pairing_rows, _ = get_data()
+    tasted_wines, recognition_rows, pairing_rows, _, _ = get_data()
 
     tier1_matches = tier1_lookup(query, tasted_wines)
     if tier1_matches:
@@ -119,44 +153,120 @@ def lookup():
     return jsonify(result)
 
 
+def find_tasted_match(producer, wine_name, tasted_wines):
+    """Look for a Tasted Wines entry matching this producer + wine_name exactly."""
+    p = normalize(producer)
+    w = normalize(wine_name)
+    for row in tasted_wines:
+        if normalize(row.get("producer", "")) == p and normalize(row.get("wine_name", "")) == w:
+            return row
+    return None
+
+
+def truncate_take(text, max_chars=80):
+    if not text:
+        return None
+    text = text.strip()
+    if len(text) <= max_chars:
+        return text
+    # Cut at the last full word before the limit, add an ellipsis
+    cut = text[:max_chars].rsplit(" ", 1)[0]
+    return cut + "…"
+
+
 @app.route("/shop", methods=["GET"])
 def shop():
     """
-    Example request:  GET /shop?name=Kaldi
+    Example request:
+      GET /shop?name=Kaldi&lang=en&colour=Red&max_abv=14&food=sukiyaki
 
-    Returns the curated list of recommended wines for that shop.
-    This is a personal shortlist, NOT a full inventory -- only wines
-    you've specifically chosen to recommend show up here.
+    All filters (colour, max_abv, food) are optional and combine.
+    lang defaults to "en". Returns the curated list of recommended
+    wines for that shop -- a personal shortlist, NOT a full inventory.
 
-    Returns JSON like:
-    { "shop": "Kaldi", "picks": [ { "producer": "...", "wine_name": "...",
-      "why_pick_this": "...", "price_range": "..." }, ... ] }
+    Each pick's "comment" field is either: the hand-written comment_en/jp
+    if present, or a truncated version of the matching Tasted Wines
+    personal_take if one exists, or null if neither is available.
     """
     shop_name = request.args.get("name", "").strip()
     if not shop_name:
         return jsonify({"error": "Missing 'name' parameter"}), 400
 
-    _, _, _, shop_picks = get_data()
+    lang = request.args.get("lang", "en").strip().lower()
+    if lang not in ("en", "jp"):
+        lang = "en"
 
-    matches = [
-        {
-            "producer": row.get("producer"),
-            "wine_name": row.get("wine_name"),
-            "why_pick_this": row.get("why_pick_this"),
+    colour = request.args.get("colour", "").strip() or None
+    food_term = request.args.get("food", "").strip() or None
+
+    max_abv_raw = request.args.get("max_abv", "").strip()
+    max_abv = None
+    if max_abv_raw:
+        try:
+            max_abv = float(max_abv_raw)
+        except ValueError:
+            return jsonify({"error": "max_abv must be a number"}), 400
+
+    tasted_wines, _, _, shop_picks, food_synonyms = get_data()
+
+    shop_rows = [row for row in shop_picks if normalize(row.get("shop", "")) == normalize(shop_name)]
+
+    filtered = filter_shop_picks(
+        shop_rows,
+        colour=colour,
+        max_abv=max_abv,
+        food_term=food_term,
+        food_synonyms=food_synonyms,
+        lang=lang,
+    )
+
+    picks_out = []
+    for row in filtered["results"]:
+        # Producer/wine name fall back to English if the _jp version is
+        # blank -- unlike comment, a missing name would break the list
+        # entirely, so showing the English name is better than nothing
+        # while Japanese translations are still being filled in.
+        producer = row.get(f"producer_{lang}") or row.get("producer_en")
+        wine_name = row.get(f"wine_name_{lang}") or row.get("wine_name_en")
+
+        comment = row.get(f"comment_{lang}")
+        if not comment and lang == "en":
+            tasted_match = find_tasted_match(
+                row.get("producer_en", ""), row.get("wine_name_en", ""), tasted_wines
+            )
+            if tasted_match:
+                comment = truncate_take(tasted_match.get("personal_take"))
+        # Note: Tasted Wines isn't bilingual yet, so for lang=jp there's no
+        # Japanese personal_take to fall back to. If comment_jp is blank,
+        # we simply show no comment rather than silently showing English
+        # text under a Japanese-language response.
+
+        picks_out.append({
+            "producer": producer,
+            "wine_name": wine_name,
+            "colour": row.get("colour"),
+            "grape": row.get("grape"),
+            "country": row.get("country"),
+            "abv": row.get("abv"),
+            "sweetness": row.get("sweetness"),
+            "comment": comment,
+            "confidence": row.get("confidence"),
             "price_range": row.get("price_range"),
-        }
-        for row in shop_picks
-        if normalize(row.get("shop", "")) == normalize(shop_name)
-    ]
+        })
 
-    if not matches:
+    if not picks_out:
         return jsonify({
             "shop": shop_name,
             "picks": [],
-            "note": "No picks catalogued for this shop yet.",
+            "food_match_type": filtered["food_match_type"],
+            "note": "No picks match these filters yet.",
         })
 
-    return jsonify({"shop": shop_name, "picks": matches})
+    return jsonify({
+        "shop": shop_name,
+        "picks": picks_out,
+        "food_match_type": filtered["food_match_type"],
+    })
 
 
 @app.route("/compare", methods=["GET"])
@@ -190,7 +300,7 @@ def compare():
             "error": f"Too many wines requested. Maximum is {MAX_COMPARE}."
         }), 400
 
-    tasted_wines, _, _, _ = get_data()
+    tasted_wines, _, _, _, _ = get_data()
 
     results = []
     for item in requested:
