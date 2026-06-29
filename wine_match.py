@@ -19,6 +19,7 @@ TIER1_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTePDaX89kTpBqe
 TIER2_RECOGNITION_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRcTkssOHFFWVeMKhwbYcxCDOVAkyRMWyRD5CCStXxOVe5Ey9O0yNdvmu468tLzBmFrOgangrDI7Pwt/pub?output=csv"
 TIER2_PAIRING_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRssfhdcNwUEWAgokQFrCJzNoGqV5v6rGggF2xJ0ax7m9tHyFgrUNhwHd0SFNuR_830l9C6SBzqYxPj/pub?output=csv"
 SHOP_PICKS_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQIbZYk4yJtk9jrClYeSuI9_Nq99qfnhga4HbcDTIA9mQUlgOlZxuFcUiLKTM8SwlPMWBXVGcXS8lkU/pub?output=csv"
+FOOD_SYNONYMS_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQYFf78-Ia73AACfk8PFAxkgOF-N_WuiVfUG2LA9GrQrkX_T4g54RYY7JPXTdm7jRZd5B2FKmYxWVXx/pub?output=csv"
 
 LOG_FILE = "misses_log.csv"  # append-only log of Tier 3 fallbacks for later review
 
@@ -175,6 +176,86 @@ def tier3_llm_fallback(query, api_key):
         # If parsing fails for any reason, fall back to showing the raw text
         # rather than crashing the request.
         return {"tier": 3, "raw": raw_text}
+
+
+# Keyword groups behind each broad food category. The synonym fallback
+# checks pairings text against ALL keywords in the matched category,
+# not just the literal category name -- e.g. "fish" should also catch
+# pairing text that says "seafood" or "salmon", not just the word "fish".
+CATEGORY_KEYWORDS = {
+    "fish": ["fish", "seafood", "salmon", "squid", "shellfish", "sashimi"],
+    "red meat": ["red meat", "beef", "steak", "yakiniku", "lamb", "braised meat", "stew"],
+    "white meat": ["white meat", "chicken", "pork", "poultry", "yakitori"],
+    "cheese": ["cheese", "aged cheese", "light bites"],
+    "spicy": ["spicy", "curry", "chili", "asian"],
+    "pasta": ["pasta", "tomato", "pizza"],
+}
+
+
+def filter_shop_picks(picks, colour=None, max_abv=None, food_term=None, food_synonyms=None, lang="en"):
+    """
+    Filter a shop's pick list by any combination of colour, ABV ceiling,
+    and food term. All filters are optional and combine with AND logic.
+
+    Food matching tries direct text match against pairings first; if no
+    picks match directly, falls back to the food_synonyms list to find
+    a broader category, then matches against ANY keyword in that
+    category's keyword group (see CATEGORY_KEYWORDS) rather than just
+    the literal category name -- e.g. "unagi" -> "fish" should also
+    match pairing text that says "seafood" or "salmon".
+
+    Returns: { "results": [...], "food_match_type": "direct" | "synonym" | None }
+    """
+    results = list(picks)
+    food_match_type = None
+
+    if colour:
+        target = normalize(colour)
+        results = [p for p in results if normalize(p.get("colour", "")) == target]
+
+    if max_abv is not None:
+        filtered = []
+        for p in results:
+            try:
+                abv_value = float(p.get("abv", ""))
+            except (ValueError, TypeError):
+                continue  # skip rows with missing/invalid ABV rather than guessing
+            if abv_value <= max_abv:
+                filtered.append(p)
+        results = filtered
+
+    if food_term:
+        pairings_key = f"pairings_{lang}"
+        term = normalize(food_term)
+
+        direct_matches = [p for p in results if term in normalize(p.get(pairings_key, ""))]
+
+        if direct_matches:
+            results = direct_matches
+            food_match_type = "direct"
+        else:
+            # Fall back to the broader category via Food Synonyms
+            broader_category = None
+            for row in (food_synonyms or []):
+                if normalize(row.get("food_term", "")) == term:
+                    broader_category = normalize(row.get("broader_category", ""))
+                    break
+
+            if broader_category:
+                keywords = CATEGORY_KEYWORDS.get(broader_category, [broader_category])
+                synonym_matches = [
+                    p for p in results
+                    if any(kw in normalize(p.get(pairings_key, "")) for kw in keywords)
+                ]
+                if synonym_matches:
+                    results = synonym_matches
+                    food_match_type = "synonym"
+                else:
+                    results = []
+            else:
+                results = []
+
+    return {"results": results, "food_match_type": food_match_type}
 
 
 def log_miss(query):
