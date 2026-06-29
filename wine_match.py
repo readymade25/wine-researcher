@@ -28,6 +28,7 @@ def fetch_csv(url):
     """Download a published Google Sheet as CSV and return list of dict rows."""
     resp = requests.get(url, timeout=5)
     resp.raise_for_status()
+    resp.encoding = "utf-8"  # Google Sheets exports as UTF-8; don't let requests guess wrong
     reader = csv.DictReader(io.StringIO(resp.text))
     return list(reader)
 
