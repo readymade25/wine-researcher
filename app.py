@@ -22,6 +22,7 @@ from wine_match import (
     log_miss,
     normalize,
     filter_shop_picks,
+    find_tasted_match,
     TIER1_CSV_URL,
     TIER2_RECOGNITION_CSV_URL,
     TIER2_PAIRING_CSV_URL,
@@ -64,9 +65,25 @@ def get_data():
                 "pairing": "Salmon, light seafood, easy drinking",
                 "value_note": "Solid for the price, reliable supermarket pick",
                 "personal_take": "Always a safe bet when nothing else stands out",
+                "would_drink_again": "Yes",
                 "shop": "Kaldi",
                 "shop_price": "998",
                 "market_price_reference": "890",
+                "image_url": "",
+            }, {
+                "producer": "Allegrini",
+                "wine_name": "Amarone",
+                "grape": "Corvina blend",
+                "colour": "Red",
+                "country": "Italy",
+                "style": "Full-bodied, dried-fruit red",
+                "pairing": "Aged cheese, braised meats, rich stews",
+                "value_note": "Pricey for what it is",
+                "personal_take": "Too heavy for most occasions",
+                "would_drink_again": "No",
+                "shop": "Kaldi",
+                "shop_price": "2500",
+                "market_price_reference": "2400",
                 "image_url": "",
             }]
             _cache["recognition_rows"] = [
@@ -95,8 +112,16 @@ def get_data():
                  "abv": "16.5", "sweetness": "Dry",
                  "pairings_en": "Aged cheese, braised meats, rich stews",
                  "pairings_jp": "熟成チーズ、煮込み料理",
-                 "comment_en": "Too heavy for most occasions", "comment_jp": "",
+                 "comment_en": "", "comment_jp": "",
                  "confidence": "tasted", "price_range": "~¥2500"},
+                {"shop": "Kaldi", "producer_en": "Pieropan", "producer_jp": "ピエロパン",
+                 "wine_name_en": "Soave Classico", "wine_name_jp": "ソアーヴェ",
+                 "colour": "White", "grape": "Garganega", "country": "Italy",
+                 "abv": "12", "sweetness": "Dry",
+                 "pairings_en": "Great with light seafood and salads",
+                 "pairings_jp": "軽い魚介類やサラダに合う",
+                 "comment_en": "Never tasted, just a shop note", "comment_jp": "",
+                 "confidence": "", "price_range": "~¥1400"},
             ]
             _cache["food_synonyms"] = [
                 {"food_term": "unagi", "broader_category": "fish"},
@@ -153,16 +178,6 @@ def lookup():
     return jsonify(result)
 
 
-def find_tasted_match(producer, wine_name, tasted_wines):
-    """Look for a Tasted Wines entry matching this producer + wine_name exactly."""
-    p = normalize(producer)
-    w = normalize(wine_name)
-    for row in tasted_wines:
-        if normalize(row.get("producer", "")) == p and normalize(row.get("wine_name", "")) == w:
-            return row
-    return None
-
-
 def truncate_take(text, max_chars=80):
     if not text:
         return None
@@ -183,6 +198,19 @@ def shop():
     All filters (colour, max_abv, food) are optional and combine.
     lang defaults to "en". Returns the curated list of recommended
     wines for that shop -- a personal shortlist, NOT a full inventory.
+
+    Results are ranked (not just filtered):
+      1. Food-match confidence tier, when a food filter is given --
+         "personal" (tasted and the pairing is backed by that tasting)
+         beats "shop_note" (only the shop-list text says so) beats
+         "closest" (matched via a broader category, not directly).
+      2. would_drink_again, pulled from a linked Tasted Wines row --
+         yes > neutral > unknown > no. A "no" wine is never hidden,
+         even if it's the only match -- it just sinks to the bottom
+         and is flagged rather than silently ranked to the top on
+         confidence alone.
+      3. Price ascending, as the final tiebreak between otherwise
+         equally-ranked picks.
 
     Each pick's "comment" field is either: the hand-written comment_en/jp
     if present, or a truncated version of the matching Tasted Wines
@@ -218,6 +246,7 @@ def shop():
         food_term=food_term,
         food_synonyms=food_synonyms,
         lang=lang,
+        tasted_wines=tasted_wines,
     )
 
     picks_out = []
@@ -230,6 +259,7 @@ def shop():
         wine_name = row.get(f"wine_name_{lang}") or row.get("wine_name_en")
 
         comment = row.get(f"comment_{lang}")
+        tasted_match = None
         if not comment and lang == "en":
             tasted_match = find_tasted_match(
                 row.get("producer_en", ""), row.get("wine_name_en", ""), tasted_wines
@@ -252,6 +282,16 @@ def shop():
             "comment": comment,
             "confidence": row.get("confidence"),
             "price_range": row.get("price_range"),
+            # food_match_tier is only meaningful when a food filter was
+            # applied ('personal' = tasted wine's own pairing backs this
+            # claim, 'shop_note' = only the shop-list text says so,
+            # 'closest' = matched via broader category, not directly).
+            # None means no food filter was active.
+            "food_match_tier": {"A": "personal", "B": "shop_note", "C": "closest"}.get(row.get("food_match_tier")),
+            # would_drink_again reflects a linked Tasted Wines opinion --
+            # 'yes' / 'neutral' / 'no', or None if this pick has never
+            # been personally tasted (no opinion on file, not a rating).
+            "would_drink_again": row.get("would_drink_again"),
         })
 
     if not picks_out:
