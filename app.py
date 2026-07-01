@@ -259,6 +259,7 @@ def shop():
         wine_name = row.get(f"wine_name_{lang}") or row.get("wine_name_en")
 
         comment = row.get(f"comment_{lang}")
+        comment_source = "shop" if comment else None
         tasted_match = None
         if not comment and lang == "en":
             tasted_match = find_tasted_match(
@@ -266,6 +267,7 @@ def shop():
             )
             if tasted_match:
                 comment = truncate_take(tasted_match.get("personal_take"))
+                comment_source = "tasted"
         # Note: Tasted Wines isn't bilingual yet, so for lang=jp there's no
         # Japanese personal_take to fall back to. If comment_jp is blank,
         # we simply show no comment rather than silently showing English
@@ -280,6 +282,16 @@ def shop():
             "abv": row.get("abv"),
             "sweetness": row.get("sweetness"),
             "comment": comment,
+            # comment_source tells the frontend where "comment" came from:
+            # 'shop' = your own comment_en/jp written for this shop listing,
+            # 'tasted' = no shop comment existed, this is a fallback from
+            # your Tasted Wines personal_take instead. This matters because
+            # when a wine also has a full Tasted Wines match, the detail
+            # view shows the richer Tasted Wines card instead of this one --
+            # a 'shop' comment needs to be surfaced there too, since it
+            # won't otherwise appear anywhere (a 'tasted' comment doesn't,
+            # since the richer card already shows the full personal_take).
+            "comment_source": comment_source,
             "confidence": row.get("confidence"),
             "price_range": row.get("price_range"),
             # food_match_tier is only meaningful when a food filter was
