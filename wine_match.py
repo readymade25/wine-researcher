@@ -9,6 +9,7 @@ Tier 3: LLM fallback for anything that misses both (logged for later cataloguing
 import csv
 import io
 import json
+import re
 import requests
 
 # --- Example data sources -----------------------------------------------
@@ -35,6 +36,55 @@ def fetch_csv(url):
 
 def normalize(text):
     return text.strip().lower()
+
+
+def find_tasted_match(producer, wine_name, tasted_wines):
+    """Look for a Tasted Wines entry matching this producer + wine_name exactly.
+
+    Shared by the /lookup enrichment path (comment fallback) and the
+    food-pairing tier logic below -- both need to know whether a Shop
+    Picks row is backed by an actual tasted record, and matching is
+    exact on producer + wine_name (after normalize) in both cases.
+    """
+    p = normalize(producer)
+    w = normalize(wine_name)
+    for row in tasted_wines:
+        if normalize(row.get("producer", "")) == p and normalize(row.get("wine_name", "")) == w:
+            return row
+    return None
+
+
+def normalize_would_drink_again(raw):
+    """Map whatever's typed in the Tasted Wines sheet to a canonical
+    yes/neutral/no, or None if blank/unrecognized. Unrecognized text is
+    treated as unknown rather than raising -- a typo in the sheet
+    shouldn't break ranking, it should just fall back to 'no opinion on
+    file', the same as a blank cell."""
+    if not raw:
+        return None
+    v = normalize(raw)
+    if v in ("yes", "y"):
+        return "yes"
+    if v in ("neutral", "maybe"):
+        return "neutral"
+    if v in ("no", "n"):
+        return "no"
+    return None
+
+
+def extract_price_number(text):
+    """Pull a rough numeric price out of a free-text field like '~¥1000'
+    or '1000-1500' (takes the first number found). Returns None if
+    nothing parseable is there, rather than guessing."""
+    if not text:
+        return None
+    match = re.search(r"[\d,]+", str(text))
+    if not match:
+        return None
+    try:
+        return float(match.group(0).replace(",", ""))
+    except ValueError:
+        return None
 
 
 def tier1_lookup(query, tasted_wines):
@@ -193,22 +243,91 @@ CATEGORY_KEYWORDS = {
 }
 
 
-def filter_shop_picks(picks, colour=None, max_abv=None, food_term=None, food_synonyms=None, lang="en"):
+def get_broader_category(term, food_synonyms):
+    """Look up the broader food category for a term via the Food Synonyms
+    sheet (e.g. 'unagi' -> 'fish'). Returns None if the term isn't a
+    known synonym."""
+    for row in (food_synonyms or []):
+        if normalize(row.get("food_term", "")) == term:
+            return normalize(row.get("broader_category", ""))
+    return None
+
+
+def compute_food_match(pick, food_term, food_synonyms, lang, tasted_wines):
+    """
+    Determine whether a Shop Picks row matches a food term, and if so,
+    at what confidence tier. Three tiers, strongest first:
+
+    Tier A -- Personally paired: the pick links to a Tasted Wines row
+    (same producer + wine_name), and that row's OWN pairing text
+    mentions the food term or its broader category. This means the
+    pairing claim is backed by an actual tasting, not just a note
+    written while curating the shop list.
+
+    Tier B -- Shop pairing note: the pick's own pairings_{lang} text
+    directly mentions the food term. No tasted backing, but it's a
+    direct textual match rather than a category guess.
+
+    Tier C -- Closest match: only found via the food_synonyms category
+    fallback against the pick's own pairing text (e.g. "unagi" not
+    mentioned directly, but the text says "salmon" and both map to
+    the "fish" category).
+
+    Returns (matches: bool, tier: 'A' | 'B' | 'C' | None).
+    """
+    if not food_term:
+        return (True, None)
+
+    term = normalize(food_term)
+    pairings_key = f"pairings_{lang}"
+    pick_text = normalize(pick.get(pairings_key, ""))
+    broader_category = get_broader_category(term, food_synonyms)
+    keywords = CATEGORY_KEYWORDS.get(broader_category, [broader_category]) if broader_category else []
+
+    tasted_match = find_tasted_match(pick.get("producer_en", ""), pick.get("wine_name_en", ""), tasted_wines) if tasted_wines else None
+    tasted_pairing_text = normalize(tasted_match.get("pairing", "")) if tasted_match else ""
+
+    if tasted_match:
+        if term in tasted_pairing_text:
+            return (True, "A")
+        if broader_category and any(kw in tasted_pairing_text for kw in keywords):
+            return (True, "A")
+
+    if term in pick_text:
+        return (True, "B")
+
+    if broader_category and any(kw in pick_text for kw in keywords):
+        return (True, "C")
+
+    return (False, None)
+
+
+_TIER_RANK = {"A": 0, "B": 1, "C": 2, None: 3}
+_RECOMMEND_RANK = {"yes": 0, "neutral": 1, None: 2, "no": 3}
+
+
+def filter_shop_picks(picks, colour=None, max_abv=None, food_term=None, food_synonyms=None, lang="en", tasted_wines=None):
     """
     Filter a shop's pick list by any combination of colour, ABV ceiling,
-    and food term. All filters are optional and combine with AND logic.
+    and food term, then rank what's left by:
 
-    Food matching tries direct text match against pairings first; if no
-    picks match directly, falls back to the food_synonyms list to find
-    a broader category, then matches against ANY keyword in that
-    category's keyword group (see CATEGORY_KEYWORDS) rather than just
-    the literal category name -- e.g. "unagi" -> "fish" should also
-    match pairing text that says "seafood" or "salmon".
+      1. Food-match confidence tier (A/B/C -- see compute_food_match).
+         No-op if food_term isn't given, since there's no tier to rank by.
+      2. would_drink_again pulled from a linked Tasted Wines row
+         (yes > neutral > unknown > no). A "no" wine is never hidden --
+         if it's the only match, it still shows -- it just sinks to the
+         bottom and gets flagged rather than silently ranked to the top
+         on confidence alone.
+      3. Price ascending, parsed from price_range where possible, as
+         the final tiebreak between otherwise-equal picks.
+
+    Each returned pick is annotated with two extra keys:
+      food_match_tier: 'A' | 'B' | 'C' | None
+      would_drink_again: 'yes' | 'neutral' | 'no' | None
 
     Returns: { "results": [...], "food_match_type": "direct" | "synonym" | None }
     """
     results = list(picks)
-    food_match_type = None
 
     if colour:
         target = normalize(colour)
@@ -225,36 +344,43 @@ def filter_shop_picks(picks, colour=None, max_abv=None, food_term=None, food_syn
                 filtered.append(p)
         results = filtered
 
+    annotated = []
+    for p in results:
+        matches, tier = compute_food_match(p, food_term, food_synonyms, lang, tasted_wines)
+        if not matches:
+            continue
+        row = dict(p)  # copy -- these rows are cached across requests, never mutate in place
+        row["food_match_tier"] = tier
+
+        tasted_match = find_tasted_match(p.get("producer_en", ""), p.get("wine_name_en", ""), tasted_wines) if tasted_wines else None
+        row["would_drink_again"] = normalize_would_drink_again(tasted_match.get("would_drink_again")) if tasted_match else None
+
+        price_source = p.get("price_range")
+        row["_price_sort"] = extract_price_number(price_source)
+        if row["_price_sort"] is None and tasted_match:
+            # Fall back to the tasted wine's own shop_price only if this
+            # pick's own price_range didn't give us a usable number.
+            row["_price_sort"] = extract_price_number(tasted_match.get("shop_price"))
+
+        annotated.append(row)
+
+    results = annotated
+
+    food_match_type = None
     if food_term:
-        pairings_key = f"pairings_{lang}"
-        term = normalize(food_term)
-
-        direct_matches = [p for p in results if term in normalize(p.get(pairings_key, ""))]
-
-        if direct_matches:
-            results = direct_matches
+        if any(p["food_match_tier"] in ("A", "B") for p in results):
             food_match_type = "direct"
-        else:
-            # Fall back to the broader category via Food Synonyms
-            broader_category = None
-            for row in (food_synonyms or []):
-                if normalize(row.get("food_term", "")) == term:
-                    broader_category = normalize(row.get("broader_category", ""))
-                    break
+        elif any(p["food_match_tier"] == "C" for p in results):
+            food_match_type = "synonym"
 
-            if broader_category:
-                keywords = CATEGORY_KEYWORDS.get(broader_category, [broader_category])
-                synonym_matches = [
-                    p for p in results
-                    if any(kw in normalize(p.get(pairings_key, "")) for kw in keywords)
-                ]
-                if synonym_matches:
-                    results = synonym_matches
-                    food_match_type = "synonym"
-                else:
-                    results = []
-            else:
-                results = []
+    results.sort(key=lambda p: (
+        _TIER_RANK.get(p.get("food_match_tier"), 3),
+        _RECOMMEND_RANK.get(p.get("would_drink_again"), 2),
+        p["_price_sort"] if p["_price_sort"] is not None else float("inf"),
+    ))
+
+    for p in results:
+        p.pop("_price_sort", None)
 
     return {"results": results, "food_match_type": food_match_type}
 
