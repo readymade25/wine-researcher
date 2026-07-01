@@ -56,10 +56,13 @@ def find_tasted_match(producer, wine_name, tasted_wines):
 
 def normalize_would_drink_again(raw):
     """Map whatever's typed in the Tasted Wines sheet to a canonical
-    yes/neutral/no, or None if blank/unrecognized. Unrecognized text is
-    treated as unknown rather than raising -- a typo in the sheet
-    shouldn't break ranking, it should just fall back to 'no opinion on
-    file', the same as a blank cell."""
+    yes/neutral/no/trash, or None if blank/unrecognized. Unrecognized
+    text is treated as unknown rather than raising -- a typo in the
+    sheet shouldn't break ranking, it should just fall back to 'no
+    opinion on file', the same as a blank cell.
+
+    'trash' is a step below 'no' -- 'no' means "not for me", 'trash'
+    means "actively bad, don't buy this regardless of context"."""
     if not raw:
         return None
     v = normalize(raw)
@@ -69,6 +72,8 @@ def normalize_would_drink_again(raw):
         return "neutral"
     if v in ("no", "n"):
         return "no"
+    if v in ("trash", "avoid", "terrible"):
+        return "trash"
     return None
 
 
@@ -303,7 +308,7 @@ def compute_food_match(pick, food_term, food_synonyms, lang, tasted_wines):
 
 
 _TIER_RANK = {"A": 0, "B": 1, "C": 2, None: 3}
-_RECOMMEND_RANK = {"yes": 0, "neutral": 1, None: 2, "no": 3}
+_RECOMMEND_RANK = {"yes": 0, "neutral": 1, None: 2, "no": 3, "trash": 4}
 
 
 def filter_shop_picks(picks, colour=None, max_abv=None, food_term=None, food_synonyms=None, lang="en", tasted_wines=None):
