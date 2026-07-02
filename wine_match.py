@@ -189,7 +189,7 @@ def tier3_llm_fallback(query, api_key):
             "content-type": "application/json",
         },
         json={
-            "model": "claude-sonnet-4-6",
+            "model": "claude-haiku-4-5",
             "max_tokens": 300,
             "messages": [
                 {
