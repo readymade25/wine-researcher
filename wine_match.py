@@ -178,7 +178,13 @@ def tier2_lookup(query, recognition_rows, pairing_rows):
 
 
 def tier3_llm_fallback(query, api_key):
-    """Call Claude for anything Tier 1 and Tier 2 couldn't resolve."""
+    """Call Claude for anything Tier 1 and Tier 2 couldn't resolve.
+
+    Uses web search so the answer is grounded in real info about the
+    specific producer/wine (especially for smaller or regional producers
+    the model wouldn't reliably know from training alone), rather than
+    a generic guess based on grape/style patterns.
+    """
     log_miss(query)
 
     response = requests.post(
@@ -190,27 +196,41 @@ def tier3_llm_fallback(query, api_key):
         },
         json={
             "model": "claude-haiku-4-5",
-            "max_tokens": 300,
+            "max_tokens": 1024,
+            "tools": [
+                {"type": "web_search_20250305", "name": "web_search", "max_uses": 3}
+            ],
             "messages": [
                 {
                     "role": "user",
                     "content": (
-                        f"Wine: '{query}'. Give a short, plain-English answer "
-                        "covering: typical style (light/full, dry/sweet), a "
-                        "concrete food pairing, and whether it's drink-now or "
-                        "can be held. No fluff, no marketing tone. "
-                        "Respond with ONLY raw JSON, no markdown code fences, "
-                        "no preamble, just the JSON object with keys: "
-                        "style, pairing, drink_window."
+                        f"Someone searched for the wine '{query}' and it wasn't found "
+                        "in a personal tasting database. Use web search if it would "
+                        "help confirm specifics (producer, region, grape, typical "
+                        "style, price) rather than guessing from memory alone -- this "
+                        "matters most for smaller or less famous producers.\n\n"
+                        "If you can identify the specific producer and/or wine, name "
+                        "it. Give real substance, not generic filler: what actually "
+                        "makes this wine or region distinctive, a concrete food "
+                        "pairing (a specific dish, not just 'red meat'), and typical "
+                        "price range if known. No marketing tone.\n\n"
+                        "Respond with ONLY raw JSON, no markdown fences, no preamble. "
+                        "Keys: producer (best guess or null), wine_name (best guess "
+                        "of the specific bottling or null), grape (or null), country "
+                        "(or null), style, pairing, drink_window, notes (1-2 "
+                        "sentences on anything distinctive worth knowing -- region "
+                        "reputation, winemaking style, etc, or null)."
                     ),
                 }
             ],
         },
-        timeout=15,
+        timeout=25,
     )
     response.raise_for_status()
     data = response.json()
-    raw_text = "".join(block.get("text", "") for block in data.get("content", []))
+    raw_text = "".join(
+        block.get("text", "") for block in data.get("content", []) if block.get("type") == "text"
+    )
 
     # Strip markdown code fences if the model added them despite instructions
     cleaned = raw_text.strip()
@@ -224,9 +244,14 @@ def tier3_llm_fallback(query, api_key):
         parsed = json.loads(cleaned)
         return {
             "tier": 3,
+            "producer": parsed.get("producer"),
+            "wine_name": parsed.get("wine_name"),
+            "grape": parsed.get("grape"),
+            "country": parsed.get("country"),
             "style": parsed.get("style"),
             "pairing": parsed.get("pairing"),
             "drink_window": parsed.get("drink_window"),
+            "notes": parsed.get("notes"),
         }
     except (json.JSONDecodeError, ValueError):
         # If parsing fails for any reason, fall back to showing the raw text
