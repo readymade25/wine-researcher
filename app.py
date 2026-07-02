@@ -18,7 +18,8 @@ from wine_match import (
     fetch_csv,
     tier1_lookup,
     tier2_lookup,
-    tier3_llm_fallback,
+    tier3_quick_guess,
+    tier3_deep_search,
     log_miss,
     normalize,
     filter_shop_picks,
@@ -174,7 +175,33 @@ def lookup():
             "error": "No match found, and LLM fallback is not configured.",
         }), 404
 
-    result = tier3_llm_fallback(query, LLM_API_KEY)
+    result = tier3_quick_guess(query, LLM_API_KEY)
+    return jsonify(result)
+
+
+@app.route("/lookup/deep", methods=["GET"])
+def lookup_deep():
+    """
+    Example request:  GET /lookup/deep?wine=Ata%20Rangi
+
+    Slower, costlier version of the Tier 3 fallback that uses live web
+    search for grounded specifics. Never called automatically by
+    /lookup -- only fired when a person explicitly asks for more than
+    the quick guess gave them (the "Search the web for more" button on
+    a Tier 3 result), since web search carries a per-call cost on top
+    of tokens and most misses don't need it.
+    """
+    query = request.args.get("wine", "").strip()
+    if not query:
+        return jsonify({"error": "Missing 'wine' parameter"}), 400
+
+    if not LLM_API_KEY:
+        return jsonify({
+            "tier": None,
+            "error": "LLM fallback is not configured.",
+        }), 404
+
+    result = tier3_deep_search(query, LLM_API_KEY)
     return jsonify(result)
 
 
