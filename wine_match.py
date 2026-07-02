@@ -215,6 +215,10 @@ def tier3_llm_fallback(query, api_key):
                         "pairing (a specific dish, not just 'red meat'), and typical "
                         "price range if known. No marketing tone.\n\n"
                         "Respond with ONLY raw JSON, no markdown fences, no preamble. "
+                        "This applies even after you use web search -- your final "
+                        "message must contain nothing but the JSON object itself, "
+                        "with no transition text like 'Now I need to...' or "
+                        "'Based on my search...' before it. "
                         "Keys: producer (best guess or null), wine_name (best guess "
                         "of the specific bottling or null), grape (or null), country "
                         "(or null), style, pairing, drink_window, notes (1-2 "
@@ -232,13 +236,20 @@ def tier3_llm_fallback(query, api_key):
         block.get("text", "") for block in data.get("content", []) if block.get("type") == "text"
     )
 
-    # Strip markdown code fences if the model added them despite instructions
+    # Extract the JSON object robustly. With web search enabled the model
+    # sometimes narrates a step ("Now I need to search for...") before its
+    # final JSON, so we can't assume the JSON is the very first thing in
+    # the text -- pull out a fenced block if present, otherwise fall back
+    # to the first "{" through the last "}" in the response.
     cleaned = raw_text.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.split("```")[1]
-        if cleaned.startswith("json"):
-            cleaned = cleaned[4:]
-        cleaned = cleaned.strip()
+    fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, re.DOTALL)
+    if fence_match:
+        cleaned = fence_match.group(1)
+    else:
+        brace_start = cleaned.find("{")
+        brace_end = cleaned.rfind("}")
+        if brace_start != -1 and brace_end != -1 and brace_end > brace_start:
+            cleaned = cleaned[brace_start:brace_end + 1]
 
     try:
         parsed = json.loads(cleaned)
