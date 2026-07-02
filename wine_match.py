@@ -177,15 +177,113 @@ def tier2_lookup(query, recognition_rows, pairing_rows):
     }
 
 
-def tier3_llm_fallback(query, api_key):
-    """Call Claude for anything Tier 1 and Tier 2 couldn't resolve.
+def _extract_json_object(raw_text):
+    """Pull a JSON object out of raw model text, tolerating markdown fences
+    and/or narration before/after it (common when the model has used a
+    tool before its final answer)."""
+    cleaned = raw_text.strip()
+    fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, re.DOTALL)
+    if fence_match:
+        return fence_match.group(1)
+    brace_start = cleaned.find("{")
+    brace_end = cleaned.rfind("}")
+    if brace_start != -1 and brace_end != -1 and brace_end > brace_start:
+        return cleaned[brace_start:brace_end + 1]
+    return cleaned
 
-    Uses web search so the answer is grounded in real info about the
-    specific producer/wine (especially for smaller or regional producers
-    the model wouldn't reliably know from training alone), rather than
-    a generic guess based on grape/style patterns.
+
+def _parse_tier3_fields(raw_text):
+    """Parse a Tier 3 JSON response into the shared field set. Returns
+    None if the text can't be parsed as JSON at all."""
+    try:
+        parsed = json.loads(_extract_json_object(raw_text))
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return {
+        "producer": parsed.get("producer"),
+        "wine_name": parsed.get("wine_name"),
+        "grape": parsed.get("grape"),
+        "country": parsed.get("country"),
+        "style": parsed.get("style"),
+        "pairing": parsed.get("pairing"),
+        "drink_window": parsed.get("drink_window"),
+        "notes": parsed.get("notes"),
+    }
+
+
+# Shared JSON-shape instruction for both Tier 3 variants -- keeping this
+# in one place means the quick guess and the deep search always return
+# fields the frontend can render identically.
+_TIER3_JSON_INSTRUCTION = (
+    "Respond with ONLY raw JSON, no markdown fences, no preamble. This "
+    "applies even after you use a tool -- your final message must contain "
+    "nothing but the JSON object itself, with no transition text like "
+    "'Now I need to...' or 'Based on my search...' before it. "
+    "Keys: producer (best guess or null), wine_name (best guess of the "
+    "specific bottling or null), grape (or null), country (or null), "
+    "style, pairing, drink_window, notes (1-2 sentences on anything "
+    "distinctive worth knowing -- region reputation, winemaking style, "
+    "etc, or null)."
+)
+
+
+def tier3_quick_guess(query, api_key):
+    """Fast, cheap Tier 3 guess -- the model's own knowledge only, no web
+    search. This is the default Tier 3 path so an ordinary miss doesn't
+    incur a search fee; it's good enough for anything reasonably well
+    known. Returned dict includes guess_type='quick' so the frontend can
+    offer the deeper search as an opt-in next step.
     """
     log_miss(query)
+
+    response = requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        json={
+            "model": "claude-haiku-4-5",
+            "max_tokens": 500,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": (
+                        f"Wine: '{query}'. Give the most informative answer you can "
+                        "from what you already know. If you recognize the specific "
+                        "producer and/or wine, name it. Give real substance, not "
+                        "generic filler: what actually makes this wine or region "
+                        "distinctive, a concrete food pairing (a specific dish, not "
+                        "just 'red meat'), and typical price range if you know it. "
+                        "If you don't recognize it specifically, say so honestly via "
+                        "null fields rather than inventing detail. No marketing "
+                        "tone.\n\n" + _TIER3_JSON_INSTRUCTION
+                    ),
+                }
+            ],
+        },
+        timeout=15,
+    )
+    response.raise_for_status()
+    data = response.json()
+    raw_text = "".join(
+        block.get("text", "") for block in data.get("content", []) if block.get("type") == "text"
+    )
+
+    fields = _parse_tier3_fields(raw_text)
+    if fields is None:
+        return {"tier": 3, "guess_type": "quick", "raw": raw_text}
+    return {"tier": 3, "guess_type": "quick", **fields}
+
+
+def tier3_deep_search(query, api_key):
+    """Slower, costlier Tier 3 lookup that uses live web search for
+    grounded specifics. Not called automatically -- only when a person
+    explicitly asks for more than the quick guess gave them, since web
+    search carries a per-call cost on top of tokens.
+    """
+    log_miss(query)  # still worth logging -- repeat deep-search queries are strong "add to Tasted Wines" candidates
 
     response = requests.post(
         "https://api.anthropic.com/v1/messages",
@@ -204,26 +302,17 @@ def tier3_llm_fallback(query, api_key):
                 {
                     "role": "user",
                     "content": (
-                        f"Someone searched for the wine '{query}' and it wasn't found "
-                        "in a personal tasting database. Use web search if it would "
-                        "help confirm specifics (producer, region, grape, typical "
-                        "style, price) rather than guessing from memory alone -- this "
-                        "matters most for smaller or less famous producers.\n\n"
-                        "If you can identify the specific producer and/or wine, name "
-                        "it. Give real substance, not generic filler: what actually "
-                        "makes this wine or region distinctive, a concrete food "
-                        "pairing (a specific dish, not just 'red meat'), and typical "
+                        f"Someone searched for the wine '{query}' and wants a deeper, "
+                        "web-grounded answer beyond a quick guess. Use web search to "
+                        "confirm specifics (producer, region, grape, typical style, "
+                        "price) rather than relying on memory alone -- this matters "
+                        "most for smaller or less famous producers. If you can "
+                        "identify the specific producer and/or wine, name it. Give "
+                        "real substance, not generic filler: what actually makes "
+                        "this wine or region distinctive, a concrete food pairing "
+                        "(a specific dish, not just a food category), and typical "
                         "price range if known. No marketing tone.\n\n"
-                        "Respond with ONLY raw JSON, no markdown fences, no preamble. "
-                        "This applies even after you use web search -- your final "
-                        "message must contain nothing but the JSON object itself, "
-                        "with no transition text like 'Now I need to...' or "
-                        "'Based on my search...' before it. "
-                        "Keys: producer (best guess or null), wine_name (best guess "
-                        "of the specific bottling or null), grape (or null), country "
-                        "(or null), style, pairing, drink_window, notes (1-2 "
-                        "sentences on anything distinctive worth knowing -- region "
-                        "reputation, winemaking style, etc, or null)."
+                        + _TIER3_JSON_INSTRUCTION
                     ),
                 }
             ],
@@ -236,38 +325,10 @@ def tier3_llm_fallback(query, api_key):
         block.get("text", "") for block in data.get("content", []) if block.get("type") == "text"
     )
 
-    # Extract the JSON object robustly. With web search enabled the model
-    # sometimes narrates a step ("Now I need to search for...") before its
-    # final JSON, so we can't assume the JSON is the very first thing in
-    # the text -- pull out a fenced block if present, otherwise fall back
-    # to the first "{" through the last "}" in the response.
-    cleaned = raw_text.strip()
-    fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, re.DOTALL)
-    if fence_match:
-        cleaned = fence_match.group(1)
-    else:
-        brace_start = cleaned.find("{")
-        brace_end = cleaned.rfind("}")
-        if brace_start != -1 and brace_end != -1 and brace_end > brace_start:
-            cleaned = cleaned[brace_start:brace_end + 1]
-
-    try:
-        parsed = json.loads(cleaned)
-        return {
-            "tier": 3,
-            "producer": parsed.get("producer"),
-            "wine_name": parsed.get("wine_name"),
-            "grape": parsed.get("grape"),
-            "country": parsed.get("country"),
-            "style": parsed.get("style"),
-            "pairing": parsed.get("pairing"),
-            "drink_window": parsed.get("drink_window"),
-            "notes": parsed.get("notes"),
-        }
-    except (json.JSONDecodeError, ValueError):
-        # If parsing fails for any reason, fall back to showing the raw text
-        # rather than crashing the request.
-        return {"tier": 3, "raw": raw_text}
+    fields = _parse_tier3_fields(raw_text)
+    if fields is None:
+        return {"tier": 3, "guess_type": "search", "raw": raw_text}
+    return {"tier": 3, "guess_type": "search", **fields}
 
 
 # Keyword groups behind each broad food category. The synonym fallback
@@ -435,7 +496,13 @@ def log_miss(query):
 
 
 def lookup_wine(query, tasted_wines, recognition_rows, pairing_rows, llm_api_key):
-    """Main entry point: run the three tiers in order, return first hit."""
+    """Main entry point: run the three tiers in order, return first hit.
+
+    Not used by app.py (which inlines this logic per-route so it can
+    also expose /lookup/deep) -- kept as a standalone convenience
+    function for scripts or a REPL. Uses the cheap quick guess, not the
+    web-search deep search, to match /lookup's default behavior.
+    """
     result = tier1_lookup(query, tasted_wines)
     if result:
         return result
@@ -444,7 +511,7 @@ def lookup_wine(query, tasted_wines, recognition_rows, pairing_rows, llm_api_key
     if result and result.get("pairing"):
         return result
 
-    return tier3_llm_fallback(query, llm_api_key)
+    return tier3_quick_guess(query, llm_api_key)
 
 
 # --- Example usage --------------------------------------------------------
